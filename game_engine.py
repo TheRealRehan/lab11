@@ -1,81 +1,74 @@
-import argparse
 import asyncio
+import json
+import argparse
 import redis.asyncio as redis
-from tictac_board import TicTacBoard
+import os
+from tictac_board import TicTacToeBoard
 
-# Redis setup
-r = redis.Redis(
-    host="ai.thewcl.com",
-    port=6379,
-    password="atmega328",
-    decode_responses=True
-)
+GAME_KEY = "tictactoe:board"
+CHANNEL = "tictactoe:updates"
 
-REDIS_KEY = "tic_tac_toe:game_state:5"
-PUBSUB_CHANNEL = "ttt_game_state_changed"
+async def publish_update(redis_client, board_dict):
+    await redis_client.publish(CHANNEL, json.dumps(board_dict))
 
-# Save board to Redis (as string)
-async def save_to_redis(board):
-    await r.set(REDIS_KEY, board.serialize())
-
-# Load board from Redis
-async def load_from_redis():
-    data = await r.get(REDIS_KEY)
-    if data is None:
-        return TicTacBoard()
-    return TicTacBoard.deserialize(data)
-
-# Game logic when it's your turn
-async def handle_board_state(i_am):
-    board = await load_from_redis()
-    board.display()
-
-    if board.is_my_turn(i_am):
-        try:
-            move = int(input(f"Your move ({i_am}): "))
-            board.make_move(move)
-            await save_to_redis(board)
-            await r.publish(PUBSUB_CHANNEL, f"{i_am} moved")
-        except ValueError:
-            print("Please enter a number between 0 and 8.")
-    else:
-        print("Waiting for opponent...")
-
-# Listen for changes
-async def listen_for_updates(i_am):
-    pubsub = r.pubsub()
-    await pubsub.subscribe(PUBSUB_CHANNEL)
-    print(f"📡 Subscribed to '{PUBSUB_CHANNEL}' as {i_am}")
-
-    await handle_board_state(i_am)
+async def subscribe_updates(redis_client, player_mark):
+    pubsub = redis_client.pubsub()
+    await pubsub.subscribe(CHANNEL)
 
     async for message in pubsub.listen():
         if message["type"] == "message":
-            await handle_board_state(i_am)
+            board_data = json.loads(message["data"])
+            if board_data["current_player"] == player_mark:
+                print("\nYour turn:")
+            else:
+                print(f"\nWaiting for {board_data['current_player']}...")
+            print(json.dumps(board_data, indent=2))
 
-# Parse CLI flags
-def parse_args():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--player", choices=["x", "o"])
-    parser.add_argument("--reset", action="store_true")
-    return parser.parse_args()
-
-# Main logic
 async def main():
-    args = parse_args()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--player", required=True, choices=["x", "o"])
+    parser.add_argument("--reset", action="store_true")
+    args = parser.parse_args()
+
+    # ✅ Redis client must be created INSIDE this function
+    student_number = os.getenv("STUDENT_NUMBER", "0")
+    redis_url = f"redis://default:atmega328@ai.thewcl.com:6379/{student_number}"
+    redis_client = redis.Redis.from_url(redis_url)
 
     if args.reset:
-        board = TicTacBoard()
-        board.reset()
-        await save_to_redis(board)
-        print("✅ Board reset.")
+        board = TicTacToeBoard()
+        await board.save_to_redis(redis_client, GAME_KEY)
+        await publish_update(redis_client, board.to_dict())
+        print("Game reset.")
         return
 
-    if not args.player:
-        print("❌ Please provide --player x or o")
-        return
+    board = await TicTacToeBoard.load_from_redis(redis_client, GAME_KEY)
+    print(json.dumps(board.to_dict(), indent=2))
 
-    await listen_for_updates(args.player)
+    asyncio.create_task(subscribe_updates(redis_client, args.player))
+
+    while True:
+        if board.winner or board.draw:
+            await asyncio.sleep(1)
+            continue
+
+        if board.current_player != args.player:
+            await asyncio.sleep(1)
+            board = await TicTacToeBoard.load_from_redis(redis_client, GAME_KEY)
+            continue
+
+        try:
+            index = int(input("Enter your move (0-8): "))
+        except ValueError:
+            print("Please enter a valid number between 0 and 8.")
+            continue
+
+        result = board.make_move(args.player, index)
+        print(result["message"])
+
+        if result["success"]:
+            await board.save_to_redis(redis_client, GAME_KEY)
+            await publish_update(redis_client, board.to_dict())
 
 if __name__ == "__main__":
     asyncio.run(main())

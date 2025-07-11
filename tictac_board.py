@@ -1,76 +1,76 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 import json
 
 @dataclass
-class TicTacBoard:
-    state: str = "is_playing"
-    player_turn: str = "x"
-    positions: list = field(default_factory=lambda: [""] * 9)
+class TicTacToeBoard:
+    board: list = field(default_factory=lambda: [None] * 9)
+    current_player: str = "x"
+    winner: str = None
+    draw: bool = False
 
-    def serialize(self):
-        return json.dumps({
-            "state": self.state,
-            "player_turn": self.player_turn,
-            "positions": self.positions
-        })
+    def make_move(self, player: str, index: int) -> dict:
+        if self.winner or self.draw:
+            return {
+                "success": False,
+                "message": f"Game is already over. Winner: {self.winner}" if self.winner else "Game ended in a draw."
+            }
 
-    @staticmethod
-    def deserialize(data: str):
-        obj = json.loads(data)
-        return TicTacBoard(**obj)
+        if player != self.current_player:
+            return {
+                "success": False,
+                "message": f"It's not your turn. It's {self.current_player}'s turn."
+            }
 
-    def reset(self):
-        self.state = "is_playing"
-        self.player_turn = "x"
-        self.positions = [""] * 9
+        if index < 0 or index >= 9 or self.board[index] is not None:
+            return {
+                "success": False,
+                "message": "Invalid move: index out of bounds or spot already taken."
+            }
 
-    def is_my_turn(self, i_am):
-        return self.state == "is_playing" and self.player_turn == i_am
+        self.board[index] = player
+        self._check_winner_or_draw()
 
-    def make_move(self, index: int):
-        if self.state != "is_playing":
-            print("Game Over")
-            return
-        if not 0 <= index <= 8:
-            print("Invalid index, must be between 0 and 8")
-            return
-        if self.positions[index] != "":
-            print("Position already taken.")
-            return
+        message = f"Player {player} moved to spot {index}."
+        if self.winner:
+            message += f" Player {player} wins!"
+        elif self.draw:
+            message += " The game is a draw."
+        else:
+            self._switch_turns()
+            message += f" It's {self.current_player}'s turn next."
 
-        self.positions[index] = self.player_turn
+        return {
+            "success": True,
+            "message": message,
+            "board": self.board
+        }
 
-        if self.check_winner():
-            self.state = f"{self.player_turn}_won"
-            print(f"Player {self.player_turn} wins!")
-            return
+    def _switch_turns(self):
+        self.current_player = "o" if self.current_player == "x" else "x"
 
-        if self.check_draw():
-            self.state = "draw"
-            print("It's a draw!")
-            return
-
-        self.switch_turn()
-
-    def check_winner(self):
-        win_patterns = [
-            (0, 1, 2), (3, 4, 5), (6, 7, 8),
-            (0, 3, 6), (1, 4, 7), (2, 5, 8),
-            (0, 4, 8), (2, 4, 6)
+    def _check_winner_or_draw(self):
+        win_positions = [
+            (0, 1, 2), (3, 4, 5), (6, 7, 8),  # rows
+            (0, 3, 6), (1, 4, 7), (2, 5, 8),  # columns
+            (0, 4, 8), (2, 4, 6)              # diagonals
         ]
-        for a, b, c in win_patterns:
-            if self.positions[a] == self.positions[b] == self.positions[c] != "":
-                return True
-        return False
+        for a, b, c in win_positions:
+            if self.board[a] and self.board[a] == self.board[b] == self.board[c]:
+                self.winner = self.board[a]
+                return
+        if all(cell is not None for cell in self.board):
+            self.draw = True
 
-    def check_draw(self):
-        return "" not in self.positions and not self.check_winner()
+    def to_dict(self):
+        return asdict(self)
 
-    def switch_turn(self):
-        self.player_turn = "o" if self.player_turn == "x" else "x"
+    async def save_to_redis(self, redis_client, game_key):
+        await redis_client.set(game_key, json.dumps(self.to_dict()))
 
-    def display(self):
-        for i in range(0, 9, 3):
-            print(self.positions[i:i+3])
-        print()
-
+    @classmethod
+    async def load_from_redis(cls, redis_client, game_key):
+        data = await redis_client.get(game_key)
+        if data:
+            obj = json.loads(data)
+            return cls(**obj)
+        return cls()
