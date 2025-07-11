@@ -1,15 +1,5 @@
 from dataclasses import dataclass, field
-import redis
 import json
-
-r = redis.Redis(
-    host="ai.thewcl.com",
-    port=6379,
-    password="atmega328",
-    decode_responses=True
-)
-
-REDIS_GAME_KEY = "tic_tac_toe:game_state:5"
 
 @dataclass
 class TicTacBoard:
@@ -18,40 +8,31 @@ class TicTacBoard:
     positions: list = field(default_factory=lambda: [""] * 9)
 
     def serialize(self):
-        board_dict = {
+        return json.dumps({
             "state": self.state,
             "player_turn": self.player_turn,
             "positions": self.positions
-        }
-        return json.dumps(board_dict)
+        })
 
-    def save_to_redis(self):
-        json_string = self.serialize()
-        game_data = json.loads(json_string)
-        r.json().set(REDIS_GAME_KEY, ".", game_data)
-
-    @classmethod
-    def load_from_redis(cls):
-        game_data = r.json().get(REDIS_GAME_KEY)
-        if game_data is None:
-            print("No game data found in Redis.")
-            return cls()
-        return cls(**game_data)
+    @staticmethod
+    def deserialize(data: str):
+        obj = json.loads(data)
+        return TicTacBoard(**obj)
 
     def reset(self):
         self.state = "is_playing"
         self.player_turn = "x"
         self.positions = [""] * 9
-        self.save_to_redis()
 
     def is_my_turn(self, i_am):
         return self.state == "is_playing" and self.player_turn == i_am
 
     def make_move(self, index: int):
         if self.state != "is_playing":
-            return "Game Over"
+            print("Game Over")
+            return
         if not 0 <= index <= 8:
-            print("Invalid index, must be between 0 and 8.")
+            print("Invalid index, must be between 0 and 8")
             return
         if self.positions[index] != "":
             print("Position already taken.")
