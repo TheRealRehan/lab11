@@ -7,6 +7,7 @@ requires-python = ">=3.9"
 dependencies = [
     "argparse",
     "fastapi>=0.116.1",
+    "httpx>=0.28.1",
     "redis>=6.2.0",
     "uvicorn>=0.35.0",
 ]
