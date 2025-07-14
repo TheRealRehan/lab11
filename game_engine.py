@@ -3,92 +3,27 @@ import sys
 import argparse
 import asyncio
 import redis.asyncio as redis
-from tictac_board import TicTacToeBoard
+import httpx
 
-# ── Require all Redis config from environment ──
+
+# ── Required environment config ──
 try:
-    STUDENT_NUMBER  = os.environ["STUDENT_NUMBER"]
-    REDIS_PASSWORD  = os.environ["REDIS_PASSWORD"]
-    REDIS_HOST      = os.environ["REDIS_HOST"]
-    REDIS_PORT      = os.environ["REDIS_PORT"]
+    STUDENT_NUMBER = os.environ["STUDENT_NUMBER"]
+    REDIS_PASSWORD = os.environ["REDIS_PASSWORD"]
+    REDIS_HOST     = os.environ["REDIS_HOST"]
+    REDIS_PORT     = os.environ["REDIS_PORT"]
 except KeyError as e:
     print(f"❌ Missing required environment variable: {e}")
     sys.exit(1)
 
-# ── Build Redis URL from environment ──
 REDIS_URL = f"redis://default:{REDIS_PASSWORD}@{REDIS_HOST}:{REDIS_PORT}/{STUDENT_NUMBER}"
 r = redis.from_url(REDIS_URL, decode_responses=True)
 
-# ── Redis key and pub/sub channel ──
-REDIS_KEY      = f"tic_tac_toe:game_state:{STUDENT_NUMBER}"
+# ── Redis Key and Pub/Sub Channel ──
+REDIS_KEY = f"tic_tac_toe:game_state:{STUDENT_NUMBER}"
 PUBSUB_CHANNEL = "ttt_game_state_changed"
 
-# ── Pub/Sub game flow ──
-
-async def handle_board_state(player: str) -> bool:
-    """
-    Return False if the game is over (win or draw), True otherwise.
-    """
-    board = await TicTacToeBoard.load_from_redis(r, REDIS_KEY)
-    display_board(board.board)
-
-    # ——— Game‐over check ———
-    if board.winner or board.draw:
-        if board.winner:
-            print(f"🏁 Game over! Player {board.winner} wins!")
-        else:
-            print("🏁 Game ended in a draw.")
-        return False   # signal “no more turns”
-
-    # ——— Still playing ———
-    if board.is_my_turn(player):
-        raw = input(f"Your move ({player}): ")
-        try:
-            idx = int(raw)
-        except ValueError:
-            print("▶ Please enter a number between 0 and 8.")
-            return True
-
-        result = board.make_move(player, idx)
-        print(result["message"])
-        if result["success"]:
-            await board.save_to_redis(r, REDIS_KEY)
-            await r.publish(PUBSUB_CHANNEL, f"{player} moved")
-    else:
-        print(f"⏳ Waiting for {board.current_player} to move...")
-
-    return True  # signal “keep listening”
-
-
-async def listen_for_updates(player: str):
-    pubsub = r.pubsub()
-    await pubsub.subscribe(PUBSUB_CHANNEL)
-    print(f"📡 Subscribed as {player} on '{PUBSUB_CHANNEL}'")
-
-    # First call
-    keep_going = await handle_board_state(player)
-    if not keep_going:
-        return
-
-    # Subsequent calls on each message
-    async for msg in pubsub.listen():
-        if msg.get("type") == "message":
-            keep_going = await handle_board_state(player)
-            if not keep_going:
-                # Cleanly exit the loop when the game is over
-                break
-            
-# ── CLI ──
-
-def parse_args():
-    parser = argparse.ArgumentParser(description="Tic-Tac-Toe with Redis + Pub/Sub")
-    parser.add_argument("--player", choices=["x", "o"], required=True, help="Choose player X or O")
-    parser.add_argument("--reset", action="store_true", help="Reset the board before playing")
-    return parser.parse_args()
-
-
-# ── Board UI ──
-
+# ── Display the board from JSON ──
 def display_board(board_list):
     for i in range(0, 9, 3):
         row = [" " if cell is None else cell for cell in board_list[i:i+3]]
@@ -96,17 +31,83 @@ def display_board(board_list):
     print()
 
 
-# ── Entrypoint ──
+# ── CLI argument parsing ──
+def parse_args():
+    parser = argparse.ArgumentParser(description="Tic-Tac-Toe HTTP Client")
+    parser.add_argument("--player", choices=["x", "o"], required=True)
+    parser.add_argument("--reset", action="store_true")
+    return parser.parse_args()
 
+
+# ── Placeholder: this will be updated in Part 2 ──
+async def handle_board_state(player: str):
+    async with httpx.AsyncClient() as client:
+        # 1. GET /state
+        try:
+            response = await client.get("http://localhost:8000/state")
+            game = response.json()
+        except Exception as e:
+            print(f"❌ Failed to fetch game state: {e}")
+            return
+
+        # 2. Display the board
+        display_board(game["board"])
+
+        # 3. Game over?
+        if game["winner"]:
+            print(f"🏁 Game Over! Player {game['winner']} wins!")
+            return
+        if game["draw"]:
+            print("🏁 Game ended in a draw.")
+            return
+
+        # 4. If it's your turn, prompt for move
+        if player == game["current_player"]:
+            try:
+                index = int(input(f"Your move ({player}): "))
+            except ValueError:
+                print("⚠️ Please enter a valid number (0-8).")
+                return
+
+            # 5. POST /move
+            move_payload = {"player": player, "index": index}
+            try:
+                move_response = await client.post("http://localhost:8000/move", json=move_payload)
+                result = move_response.json()
+                print(result["message"])
+            except Exception as e:
+                print(f"❌ Move failed: {e}")
+        else:
+            print(f"⏳ Waiting for {game['current_player']} to move...")
+
+
+
+# ── Pub/Sub Listener ──
+async def listen_for_updates(player: str):
+    pubsub = r.pubsub()
+    await pubsub.subscribe(PUBSUB_CHANNEL)
+    print(f"📡 Subscribed as {player} on '{PUBSUB_CHANNEL}'")
+
+    await handle_board_state(player)
+
+    async for msg in pubsub.listen():
+        if msg.get("type") == "message":
+            await handle_board_state(player)
+
+
+# ── Main ──
 async def main():
     args = parse_args()
 
-    if args.reset:
-        board = TicTacToeBoard()
-        board.reset()
-        await board.save_to_redis(r, REDIS_KEY)
-        print("✅ Board reset.")
-        return
+    async with httpx.AsyncClient() as client:
+        if args.reset:
+            try:
+                response = await client.post("http://localhost:8000/reset")
+                result = response.json()
+                print(result["message"])
+            except Exception as e:
+                print(f"❌ Reset failed: {e}")
+            return
 
     await listen_for_updates(args.player)
 

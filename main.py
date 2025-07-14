@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request, Body
+from fastapi import FastAPI, Body
 from tictac_board import TicTacToeBoard
 import redis.asyncio as redis
 import os
