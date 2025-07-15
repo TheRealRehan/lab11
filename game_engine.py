@@ -1,10 +1,11 @@
 import os
 import sys
-import argparse
+import json
 import asyncio
+import argparse
 import redis.asyncio as redis
 import httpx
-
+import websockets
 
 # ── Required environment config ──
 try:
@@ -23,13 +24,15 @@ r = redis.from_url(REDIS_URL, decode_responses=True)
 REDIS_KEY = f"tic_tac_toe:game_state:{STUDENT_NUMBER}"
 PUBSUB_CHANNEL = "ttt_game_state_changed"
 
+# ── Track WebSocket connections ──
+connected_clients = set()
+
 # ── Display the board from JSON ──
 def display_board(board_list):
     for i in range(0, 9, 3):
         row = [" " if cell is None else cell for cell in board_list[i:i+3]]
         print(row)
     print()
-
 
 # ── CLI argument parsing ──
 def parse_args():
@@ -38,22 +41,32 @@ def parse_args():
     parser.add_argument("--reset", action="store_true")
     return parser.parse_args()
 
+# ── Redis helpers ─
+async def save_to_redis(board):
+    await r.set(REDIS_KEY, json.dumps(board))
 
-# ── Placeholder: this will be updated in Part 2 ──
-async def handle_board_state(player: str):
+async def load_from_redis():
+    data = await r.get(REDIS_KEY)
+    if not data:
+        return {"board": [None] * 9, "current_player": "x", "winner": None, "draw": False}
+    return json.loads(data)
+
+# ── Broadcast updated state to all connected clients ─
+async def broadcast_state(board):
+    if not connected_clients:
+        return
+    message = json.dumps({"positions": board["board"]})
+    await asyncio.gather(*(client.send(message) for client in connected_clients))
+
+# ── Handle moves and game logic ─
+async def handle_board_state(player):
     async with httpx.AsyncClient() as client:
         # 1. GET /state
-        try:
-            response = await client.get("http://localhost:8000/state")
-            game = response.json()
-        except Exception as e:
-            print(f"❌ Failed to fetch game state: {e}")
-            return
+        response = await client.get("http://localhost:8000/state")
+        game = response.json()
 
-        # 2. Display the board
         display_board(game["board"])
 
-        # 3. Game over?
         if game["winner"]:
             print(f"🏁 Game Over! Player {game['winner']} wins!")
             return
@@ -61,29 +74,25 @@ async def handle_board_state(player: str):
             print("🏁 Game ended in a draw.")
             return
 
-        # 4. If it's your turn, prompt for move
         if player == game["current_player"]:
             try:
                 index = int(input(f"Your move ({player}): "))
             except ValueError:
-                print("⚠️ Please enter a valid number (0-8).")
+                print("⚠️ Please enter a valid number (0–8).")
                 return
 
-            # 5. POST /move
             move_payload = {"player": player, "index": index}
-            try:
-                move_response = await client.post("http://localhost:8000/move", json=move_payload)
-                result = move_response.json()
-                print(result["message"])
-            except Exception as e:
-                print(f"❌ Move failed: {e}")
+            move_response = await client.post("http://localhost:8000/move", json=move_payload)
+            result = move_response.json()
+            print(result["message"])
+
+            board = await load_from_redis()
+            await broadcast_state(board)
         else:
             print(f"⏳ Waiting for {game['current_player']} to move...")
 
-
-
-# ── Pub/Sub Listener ──
-async def listen_for_updates(player: str):
+# ── Pub/Sub Listener ─
+async def listen_for_updates(player):
     pubsub = r.pubsub()
     await pubsub.subscribe(PUBSUB_CHANNEL)
     print(f"📡 Subscribed as {player} on '{PUBSUB_CHANNEL}'")
@@ -93,24 +102,44 @@ async def listen_for_updates(player: str):
     async for msg in pubsub.listen():
         if msg.get("type") == "message":
             await handle_board_state(player)
+            state = await load_from_redis()
+            if state["winner"] or state["draw"]:
+                print("👋 Game over. Exiting.")
+                break
 
+# ── WebSocket Server ─
+async def websocket_broadcaster():
+    async def handler(websocket):
+        connected_clients.add(websocket)
+        try:
+            board = await load_from_redis()
+            await websocket.send(json.dumps({"positions": board["board"]}))
+            await asyncio.Future()  # Keep open
+        except:
+            pass
+        finally:
+            connected_clients.remove(websocket)
 
-# ── Main ──
+    port = 8700 + int(STUDENT_NUMBER)
+    print(f"🌐 WebSocket server running on ws://localhost:{port}")
+    await websockets.serve(handler, "0.0.0.0", port, reuse_port=True)
+
+# ── Main Entrypoint ─
 async def main():
     args = parse_args()
 
-    async with httpx.AsyncClient() as client:
-        if args.reset:
-            try:
-                response = await client.post("http://localhost:8000/reset")
-                result = response.json()
-                print(result["message"])
-            except Exception as e:
-                print(f"❌ Reset failed: {e}")
-            return
+    if args.reset:
+        board = {"board": [None] * 9, "current_player": "x", "winner": None, "draw": False}
+        await save_to_redis(board)
+        await broadcast_state(board)
+        print("✅ Board has been reset.")
+        return
 
-    await listen_for_updates(args.player)
-
+    await asyncio.gather(
+        listen_for_updates(args.player),
+        websocket_broadcaster()
+    )
 
 if __name__ == "__main__":
     asyncio.run(main())
+
